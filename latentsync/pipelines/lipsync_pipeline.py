@@ -29,6 +29,7 @@ from diffusers.utils import deprecate, logging
 
 from einops import rearrange
 import cv2
+import imageio
 
 from ..models.unet import UNet3DConditionModel
 from ..utils.util import read_video, read_audio, write_video, check_ffmpeg_installed
@@ -265,9 +266,23 @@ class LipsyncPipeline(DiffusionPipeline):
         faces = torch.stack(faces)
         return faces, boxes, affine_matrices
 
-    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
+    # def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
+    #     video_frames = video_frames[: len(faces)]
+    #     out_frames = []
+    #     print(f"Restoring {len(faces)} faces...")
+    #     for index, face in enumerate(tqdm.tqdm(faces)):
+    #         x1, y1, x2, y2 = boxes[index]
+    #         height = int(y2 - y1)
+    #         width = int(x2 - x1)
+    #         face = torchvision.transforms.functional.resize(
+    #             face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
+    #         )
+    #         out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
+    #         out_frames.append(out_frame)
+    #     return np.stack(out_frames, axis=0)
+
+    def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list, video_writer):
         video_frames = video_frames[: len(faces)]
-        out_frames = []
         print(f"Restoring {len(faces)} faces...")
         for index, face in enumerate(tqdm.tqdm(faces)):
             x1, y1, x2, y2 = boxes[index]
@@ -277,8 +292,7 @@ class LipsyncPipeline(DiffusionPipeline):
                 face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
             )
             out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
-            out_frames.append(out_frame)
-        return np.stack(out_frames, axis=0)
+            video_writer.append_data(out_frame)
 
     def loop_video(self, whisper_chunks: list, video_frames: np.ndarray):
         # If the audio is longer than the video, we need to loop the video
@@ -465,22 +479,60 @@ class LipsyncPipeline(DiffusionPipeline):
             )
             synced_video_frames.append(decoded_latents)
 
-        synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
-
-        audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
-        audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
-
-        if is_train:
-            self.denoising_unet.train()
-
+        # Setup temporary directory and video writer
         temp_dir = "temp"
         if os.path.exists(temp_dir):
             shutil.rmtree(temp_dir)
         os.makedirs(temp_dir, exist_ok=True)
+        
+        temp_video_path = os.path.join(temp_dir, "video.mp4")
+        writer = imageio.get_writer(
+            temp_video_path,
+            fps=video_fps,
+            codec="libx264",
+            macro_block_size=None,
+            ffmpeg_params=["-crf", "18"],
+            ffmpeg_log_level="error",
+        )
 
-        write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=25)
+        all_synced_frames_tensor = torch.cat(synced_video_frames)
+        
+        # Restore video by writing frames directly to the file
+        self.restore_video(all_synced_frames_tensor, video_frames, boxes, affine_matrices, writer)
+        writer.close()
 
+        # Trim audio to match the video length
+        num_synced_frames = len(all_synced_frames_tensor)
+        audio_samples_remain_length = int(num_synced_frames / video_fps * audio_sample_rate)
+        audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
+
+        if is_train:
+            self.denoising_unet.train()
+        
+        # Save trimmed audio
         sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
 
-        command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
+        # Combine the processed video and audio using ffmpeg
+        command = f"ffmpeg -y -loglevel error -nostdin -i {temp_video_path} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
+        
+
+        # synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
+
+        # audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
+        # audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
+
+        # if is_train:
+        #     self.denoising_unet.train()
+
+        # temp_dir = "temp"
+        # if os.path.exists(temp_dir):
+        #     shutil.rmtree(temp_dir)
+        # os.makedirs(temp_dir, exist_ok=True)
+
+        # write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=25)
+
+        # sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
+
+        # command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
+        # subprocess.run(command, shell=True)
