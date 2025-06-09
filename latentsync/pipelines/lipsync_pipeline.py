@@ -266,21 +266,6 @@ class LipsyncPipeline(DiffusionPipeline):
         faces = torch.stack(faces)
         return faces, boxes, affine_matrices
 
-    # def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list):
-    #     video_frames = video_frames[: len(faces)]
-    #     out_frames = []
-    #     print(f"Restoring {len(faces)} faces...")
-    #     for index, face in enumerate(tqdm.tqdm(faces)):
-    #         x1, y1, x2, y2 = boxes[index]
-    #         height = int(y2 - y1)
-    #         width = int(x2 - x1)
-    #         face = torchvision.transforms.functional.resize(
-    #             face, size=(height, width), interpolation=transforms.InterpolationMode.BICUBIC, antialias=True
-    #         )
-    #         out_frame = self.image_processor.restorer.restore_img(video_frames[index], face, affine_matrices[index])
-    #         out_frames.append(out_frame)
-    #     return np.stack(out_frames, axis=0)
-
     def restore_video(self, faces: torch.Tensor, video_frames: np.ndarray, boxes: list, affine_matrices: list, video_writer):
         video_frames = video_frames[: len(faces)]
         print(f"Restoring {len(faces)} faces...")
@@ -516,23 +501,3 @@ class LipsyncPipeline(DiffusionPipeline):
         command = f"ffmpeg -y -loglevel error -nostdin -i {temp_video_path} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
         subprocess.run(command, shell=True)
         
-
-        # synced_video_frames = self.restore_video(torch.cat(synced_video_frames), video_frames, boxes, affine_matrices)
-
-        # audio_samples_remain_length = int(synced_video_frames.shape[0] / video_fps * audio_sample_rate)
-        # audio_samples = audio_samples[:audio_samples_remain_length].cpu().numpy()
-
-        # if is_train:
-        #     self.denoising_unet.train()
-
-        # temp_dir = "temp"
-        # if os.path.exists(temp_dir):
-        #     shutil.rmtree(temp_dir)
-        # os.makedirs(temp_dir, exist_ok=True)
-
-        # write_video(os.path.join(temp_dir, "video.mp4"), synced_video_frames, fps=25)
-
-        # sf.write(os.path.join(temp_dir, "audio.wav"), audio_samples, audio_sample_rate)
-
-        # command = f"ffmpeg -y -loglevel error -nostdin -i {os.path.join(temp_dir, 'video.mp4')} -i {os.path.join(temp_dir, 'audio.wav')} -c:v libx264 -crf 18 -c:a aac -q:v 0 -q:a 0 {video_out_path}"
-        # subprocess.run(command, shell=True)
